@@ -2,15 +2,15 @@ name: Hello Actions
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      # No third-party actions — proves runners work under strict org policy.
+      # After Actions settings allow `actions/checkout`, you can add checkout back.
       - name: Hello
         run: echo "Actions OK"
