@@ -1,0 +1,122 @@
+# Reusable CI for Node/Express backends (optional lint, typecheck, tests, build, secret scan).
+# Caller: uses: org/CI-Pipeline/.github/workflows/reusable-node-ci.yml@main
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version
+        type: string
+        default: "20"
+      working-directory:
+        description: Directory containing package.json
+        type: string
+        default: "."
+      run-lint:
+        description: Run ESLint via npm run lint (set false if no lint script)
+        type: boolean
+        default: false
+      typecheck-command:
+        description: Typecheck command (e.g. npm run check)
+        type: string
+        default: "npm run check"
+      run-tests:
+        description: Run tests via test-command
+        type: boolean
+        default: true
+      test-command:
+        description: Test command
+        type: string
+        default: "npm test"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Lint
+        if: inputs.run-lint
+        run: npm run lint
+      - name: Lint skipped
+        if: ${{ !inputs.run-lint }}
+        run: echo "run-lint=false — skipping npm run lint"
+
+  typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: ${{ inputs.typecheck-command }}
+
+  unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Test
+        if: inputs.run-tests
+        run: ${{ inputs.test-command }}
+      - name: Skip tests
+        if: ${{ !inputs.run-tests }}
+        run: echo "run-tests=false — skipping tests"
+
+  build:
+    needs: [lint, typecheck, unit]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,246 @@
+name: System Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch/tag to run in target repos"
+        required: false
+        default: "main"
+      run_ingestion_chain:
+        description: "Run ingestion orchestrator as part of system gate"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: system-orchestrator
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  precheck_secret:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure orchestrator token exists
+        env:
+          SYSTEM_TOKEN: ${{ secrets.SYSTEM_ORCHESTRATOR_GH_TOKEN_CI }}
+        run: |
+          if [ -z "$SYSTEM_TOKEN" ]; then
+            echo "Missing secret SYSTEM_ORCHESTRATOR_GH_TOKEN_CI"
+            echo "Add it after admin approval, then re-run."
+            exit 1
+          fi
+  detect_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run_frontend: ${{ steps.out.outputs.run_frontend }}
+      run_backend: ${{ steps.out.outputs.run_backend }}
+      run_rag: ${{ steps.out.outputs.run_rag }}
+    steps:
+      - id: out
+        run: |
+          # Manual orchestrator default: run everything
+          echo "run_frontend=true" >> "$GITHUB_OUTPUT"
+          echo "run_backend=true" >> "$GITHUB_OUTPUT"
+          echo "run_rag=true" >> "$GITHUB_OUTPUT"
+
+  frontend_check:
+    needs: [precheck_secret, detect_changes]
+    if: needs.detect_changes.outputs.run_frontend == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYSTEM_ORCHESTRATOR_GH_TOKEN_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger frontend workflow
+        run: |
+          gh workflow run "frontend-ci.yml" \
+            --repo "${ORG}/b2c_frontend" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve frontend run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/b2c_frontend" \
+              --workflow "frontend-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for frontend workflow"
+          exit 1
+
+      - name: Wait for frontend workflow
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/b2c_frontend" --exit-status
+
+  backend_check:
+    needs: [precheck_secret, detect_changes]
+    if: needs.detect_changes.outputs.run_backend == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYSTEM_ORCHESTRATOR_GH_TOKEN_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger backend workflow
+        run: |
+          gh workflow run "backend-ci.yml" \
+            --repo "${ORG}/b2c_backend" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve backend run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/b2c_backend" \
+              --workflow "backend-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for backend workflow"
+          exit 1
+
+      - name: Wait for backend workflow
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/b2c_backend" --exit-status
+
+  rag_check:
+    needs: [precheck_secret, detect_changes]
+    if: needs.detect_changes.outputs.run_rag == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYSTEM_ORCHESTRATOR_GH_TOKEN_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger RAG workflow
+        run: |
+          gh workflow run "rag-ci.yml" \
+            --repo "${ORG}/RAG-Pipeline" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve RAG run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/RAG-Pipeline" \
+              --workflow "rag-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for RAG workflow"
+          exit 1
+
+      - name: Wait for RAG workflow
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/RAG-Pipeline" --exit-status
+
+  ingestion_chain:
+    needs: [frontend_check, backend_check, rag_check]
+    if: inputs.run_ingestion_chain
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYSTEM_ORCHESTRATOR_GH_TOKEN_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger ingestion orchestrator
+        run: |
+          gh workflow run "ingestion-orchestrator.yml" \
+            --repo "${ORG}/CI-Pipeline" \
+            --ref "${TARGET_REF}" \
+            -f ref="${TARGET_REF}"
+
+      - name: Resolve ingestion orchestrator run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/CI-Pipeline" \
+              --workflow "ingestion-orchestrator.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for ingestion orchestrator"
+          exit 1
+
+      - name: Wait for ingestion orchestrator
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/CI-Pipeline" --exit-status
+
+  final_gate:
+    needs:
+      - detect_changes
+      - frontend_check
+      - backend_check
+      - rag_check
+      - ingestion_chain
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce gate
+        run: |
+          echo "frontend_check=${{ needs.frontend_check.result }}"
+          echo "backend_check=${{ needs.backend_check.result }}"
+          echo "rag_check=${{ needs.rag_check.result }}"
+          echo "ingestion_chain=${{ needs.ingestion_chain.result }}"
+
+          # Fail if any required job failed/cancelled
+          for result in \
+            "${{ needs.frontend_check.result }}" \
+            "${{ needs.backend_check.result }}" \
+            "${{ needs.rag_check.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "System gate failed."
+              exit 1
+            fi
+          done
+
+          if [ "${{ inputs.run_ingestion_chain }}" = "true" ]; then
+            if [ "${{ needs.ingestion_chain.result }}" = "failure" ] || [ "${{ needs.ingestion_chain.result }}" = "cancelled" ]; then
+              echo "System gate failed due to ingestion chain."
+              exit 1
+            fi
+          fi
+
+          echo "System gate passed."

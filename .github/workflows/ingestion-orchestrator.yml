@@ -1,0 +1,227 @@
+name: Ingestion Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch/tag to run in target repos"
+        required: false
+        default: "main"
+      dry_run:
+        description: "Run in dry mode (no side effects where supported)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: ingestion-orchestrator
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run_prebronze:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.Orchestration_GH_Token_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger prebronze workflow
+        run: |
+          gh workflow run "ingestion-stage1-ci.yml" \
+            --repo "${ORG}/prebronze-to-bronze" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve prebronze run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/prebronze-to-bronze" \
+              --workflow "ingestion-stage1-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for prebronze workflow"
+          exit 1
+
+      - name: Wait for prebronze completion
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/prebronze-to-bronze" --exit-status
+
+  run_usda_fetch:
+    needs: [run_prebronze]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.Orchestration_GH_Token_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger USDA fetch workflow
+        run: |
+          gh workflow run "usda-nutrition-fetch-ci.yml" \
+            --repo "${ORG}/Nutrition_USDA_Fetching" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve USDA fetch run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/Nutrition_USDA_Fetching" \
+              --workflow "usda-nutrition-fetch-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for USDA fetch workflow"
+          exit 1
+
+      - name: Wait for USDA fetch completion
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/Nutrition_USDA_Fetching" --exit-status
+
+  run_bronze_silver:
+    needs: [run_usda_fetch]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.Orchestration_GH_Token_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger bronze->silver workflow
+        run: |
+          gh workflow run "ingestion-stage2-ci.yml" \
+            --repo "${ORG}/bronze-to-silver" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve bronze->silver run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/bronze-to-silver" \
+              --workflow "ingestion-stage2-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for bronze->silver workflow"
+          exit 1
+
+      - name: Wait for bronze->silver completion
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/bronze-to-silver" --exit-status
+
+  run_silver_gold:
+    needs: [run_bronze_silver]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.Orchestration_GH_Token_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger silver->gold workflow
+        run: |
+          gh workflow run "ingestion-stage3-ci.yml" \
+            --repo "${ORG}/silver-to-gold" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve silver->gold run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/silver-to-gold" \
+              --workflow "ingestion-stage3-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for silver->gold workflow"
+          exit 1
+
+      - name: Wait for silver->gold completion
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/silver-to-gold" --exit-status
+
+  run_gold_neo4j:
+    needs: [run_silver_gold]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.Orchestration_GH_Token_CI }}
+      ORG: ConferInc
+      TARGET_REF: ${{ inputs.ref }}
+    steps:
+      - name: Trigger gold->neo4j workflow
+        run: |
+          gh workflow run "ingestion-stage4-ci.yml" \
+            --repo "${ORG}/gold-to-neo4j" \
+            --ref "${TARGET_REF}"
+
+      - name: Resolve gold->neo4j run id
+        run: |
+          sleep 3
+          RUN_ID=""
+          for i in 1 2 3 4 5 6; do
+            RUN_ID="$(gh run list \
+              --repo "${ORG}/gold-to-neo4j" \
+              --workflow "ingestion-stage4-ci.yml" \
+              --branch "${TARGET_REF}" \
+              --event workflow_dispatch \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+            if [ -n "${RUN_ID}" ] && [ "${RUN_ID}" != "null" ]; then
+              echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Could not resolve run id for gold->neo4j workflow"
+          exit 1
+
+      - name: Wait for gold->neo4j completion
+        run: |
+          gh run watch "${RUN_ID}" --repo "${ORG}/gold-to-neo4j" --exit-status
+
+  finalize:
+    needs:
+      - run_prebronze
+      - run_usda_fetch
+      - run_bronze_silver
+      - run_silver_gold
+      - run_gold_neo4j
+    runs-on: ubuntu-latest
+    steps:
+      - name: Success
+        run: echo "Ingestion chain completed successfully."
