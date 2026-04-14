@@ -1,0 +1,122 @@
+name: Reusable — CD Deploy
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Docker image name (e.g. nutrition-backend)"
+        required: true
+        type: string
+      coolify_uuid:
+        description: "Coolify application UUID to trigger deploy"
+        required: true
+        type: string
+      health_endpoint:
+        description: "Full URL for health check (e.g. https://api.nutrismarts.ai/healthz)"
+        required: false
+        type: string
+        default: ""
+      dockerfile:
+        description: "Dockerfile path"
+        required: false
+        type: string
+        default: "Dockerfile"
+      registry:
+        description: "Container registry URL"
+        required: false
+        type: string
+        default: "ghcr.io"
+    secrets:
+      GH_APP_PRIVATE_KEY:
+        required: true
+      GH_APP_ID:
+        required: true
+      GH_APP_INSTALLATION_ID:
+        required: true
+      COOLIFY_API_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          installation-id: ${{ secrets.GH_APP_INSTALLATION_ID }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ steps.app-token.outputs.token }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "image=${{ inputs.registry }}/conferinc/${{ inputs.image_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_short }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trigger Coolify Deploy
+        env:
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${COOLIFY_API_TOKEN}" \
+            "https://coolify.confer.today/api/v1/deploy?uuid=${{ inputs.coolify_uuid }}")
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Coolify deploy triggered (HTTP ${HTTP_CODE})"
+          else
+            echo "❌ Coolify deploy failed (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+
+      - name: Health Check
+        if: ${{ inputs.health_endpoint != '' }}
+        run: |
+          echo "Waiting for deployment to become healthy..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.health_endpoint }}" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Healthy (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting... (attempt $i/30, status: ${STATUS:-no response})"
+            sleep 10
+          done
+          echo "❌ Health check failed after 30 attempts"
+          exit 1
+
+      - name: Deploy Summary
+        if: always()
+        run: |
+          echo "## CD Deploy Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_short }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Coolify UUID | \`${{ inputs.coolify_uuid }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Health Check | ${{ inputs.health_endpoint || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
