@@ -1,0 +1,21 @@
+name: System CD Orchestrator
+
+on:
+  workflow_run:
+    workflows: ["B2C Backend CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy-backend:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    uses: ConferInc/CI-Pipeline/.github/workflows/reusable-cd-deploy.yml@main
+    with:
+      image_name: nutrition-backend
+      coolify_uuid: d0c8kogkk0w0ks8k0owo0848
+      health_endpoint: http://d0c8kogkk0w0ks8k0owo0848.207.244.226.234.sslip.io/healthz
+    secrets:
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+      COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
