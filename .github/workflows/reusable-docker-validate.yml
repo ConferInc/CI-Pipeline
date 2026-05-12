@@ -42,3 +42,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: ${{ inputs.build-args }}
+
+      - name: Scan for leaked secrets
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: '1'
+          severity: HIGH,CRITICAL
