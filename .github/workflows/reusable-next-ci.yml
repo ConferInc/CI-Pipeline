@@ -24,6 +24,10 @@ on:
         description: Run tsc --noEmit (set false to skip)
         type: boolean
         default: true
+      run-build:
+        description: Run npm run build (set false to skip — docker-validate covers it)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -95,6 +99,7 @@ jobs:
 
   build:
     needs: [lint, typecheck, unit]
+    if: ${{ inputs.run-build != false }}
     runs-on: ubuntu-latest
     defaults:
       run:
