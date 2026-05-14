@@ -16,6 +16,14 @@ on:
         description: Run npm test (skip if your package.json has no test script)
         type: boolean
         default: false
+      run-lint:
+        description: Run eslint (set false to skip)
+        type: boolean
+        default: true
+      run-typecheck:
+        description: Run tsc --noEmit (set false to skip)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -37,7 +45,11 @@ jobs:
       - name: Install
         run: npm ci
       - name: Lint
+        if: inputs.run-lint
         run: npm run lint
+      - name: Skip lint
+        if: ${{ !inputs.run-lint }}
+        run: echo "run-lint=false — skipping lint"
 
   typecheck:
     runs-on: ubuntu-latest
@@ -54,7 +66,11 @@ jobs:
       - name: Install
         run: npm ci
       - name: Typecheck
+        if: inputs.run-typecheck
         run: npx tsc --noEmit
+      - name: Skip typecheck
+        if: ${{ !inputs.run-typecheck }}
+        run: echo "run-typecheck=false — skipping typecheck"
 
   unit:
     runs-on: ubuntu-latest
