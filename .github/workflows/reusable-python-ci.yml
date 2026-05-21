@@ -36,6 +36,26 @@ on:
         description: Extra arguments for pytest (e.g. tests/ -q)
         type: string
         default: ""
+      run-pip-audit:
+        description: Run pip-audit for dependency vulnerability scanning
+        type: boolean
+        default: false
+      run-bandit:
+        description: Run Bandit SAST security scan
+        type: boolean
+        default: false
+      run-ruff-format:
+        description: Run Ruff format check
+        type: boolean
+        default: false
+      run-license-check:
+        description: Run pip-licenses for license compliance
+        type: boolean
+        default: false
+      coverage-threshold:
+        description: Minimum code coverage percentage (0 = disabled)
+        type: number
+        default: 0
 
 permissions:
   contents: read
@@ -59,11 +79,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r "$GITHUB_WORKSPACE/${{ inputs.requirements-file }}"
 
-      - name: Ruff
+      - name: Ruff lint
         if: inputs.run-ruff
         run: |
           pip install "ruff>=0.4"
           ruff check .
+
+      - name: Ruff format check
+        if: inputs.run-ruff-format
+        run: |
+          pip install "ruff>=0.4"
+          ruff format --check .
 
       - name: Mypy
         if: inputs.run-mypy
@@ -71,11 +97,35 @@ jobs:
           pip install "mypy>=1.8"
           mypy ${{ inputs.mypy-targets }}
 
+      - name: Dependency vulnerability scan
+        if: inputs.run-pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit
+
+      - name: SAST — Bandit
+        if: inputs.run-bandit
+        run: |
+          pip install "bandit[toml]"
+          bandit -r . -ll -x .venv,tests,__pycache__
+
+      - name: License compliance check
+        if: inputs.run-license-check
+        run: |
+          pip install pip-licenses
+          pip-licenses --allow-only="MIT License;BSD License;Apache Software License;ISC License (ISCL);Python Software Foundation License;Public Domain;The Unlicense (Unlicense);Mozilla Public License 2.0 (MPL 2.0)"
+
       - name: Pytest
         if: inputs.run-pytest
+        env:
+          COV_THRESHOLD: ${{ inputs.coverage-threshold }}
         run: |
-          pip install "pytest>=7"
-          pytest ${{ inputs.pytest-targets }}
+          pip install "pytest>=7" pytest-cov
+          if [ "${COV_THRESHOLD:-0}" -gt "0" ]; then
+            pytest ${{ inputs.pytest-targets }} --cov=. --cov-fail-under=${COV_THRESHOLD}
+          else
+            pytest ${{ inputs.pytest-targets }}
+          fi
 
   secrets:
     runs-on: ubuntu-latest
@@ -88,15 +138,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
         run: |
-          # Install gitleaks
           wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
           tar xzf gitleaks_8.24.3_linux_x64.tar.gz
-          
-          # Scan — exit code 1 = leaks found, 0 = clean
-          # Capture exit code to handle stderr noise from git
           EXIT_CODE=0
           ./gitleaks detect --source=. --verbose || EXIT_CODE=$?
-          
           if [ "$EXIT_CODE" -eq 1 ]; then
             echo "::error::Gitleaks found secrets in this repository!"
             exit 1
@@ -104,5 +149,4 @@ jobs:
             echo "::warning::Gitleaks encountered an error (exit 2), but no leaks were found. Continuing."
             exit 0
           fi
-          
           echo "✅ No leaks found"
