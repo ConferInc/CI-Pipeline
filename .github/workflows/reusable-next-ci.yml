@@ -28,11 +28,31 @@ on:
         description: Run npm run build (set false to skip — docker-validate covers it)
         type: boolean
         default: true
+      run-npm-audit:
+        description: Run npm audit for dependency vulnerability scanning
+        type: boolean
+        default: false
+      run-prettier:
+        description: Run Prettier format check
+        type: boolean
+        default: false
+      run-semgrep:
+        description: Run Semgrep SAST security scan
+        type: boolean
+        default: false
+      run-license-check:
+        description: Run license-checker for license compliance
+        type: boolean
+        default: false
+      coverage-threshold:
+        description: Minimum code coverage percentage (0 = disabled)
+        type: number
+        default: 0
 
 permissions:
   contents: read
   pull-requests: read
-  
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -54,6 +74,12 @@ jobs:
       - name: Skip lint
         if: ${{ !inputs.run-lint }}
         run: echo "run-lint=false — skipping lint"
+      - name: Prettier format check
+        if: inputs.run-prettier
+        run: npx prettier --check .
+      - name: License compliance check
+        if: inputs.run-license-check
+        run: npx license-checker --onlyAllow "MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;Unlicense;Python-2.0;CC-BY-3.0;CC-BY-4.0" --excludePrivatePackages
 
   typecheck:
     runs-on: ubuntu-latest
@@ -90,15 +116,38 @@ jobs:
           cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
       - name: Install
         run: npm ci
+      - name: Dependency vulnerability scan
+        if: inputs.run-npm-audit
+        run: npm audit --audit-level=high
       - name: Test
         if: inputs.run-tests
-        run: npm test
+        env:
+          COV_THRESHOLD: ${{ inputs.coverage-threshold }}
+        run: |
+          if [ "${COV_THRESHOLD:-0}" -gt "0" ]; then
+            npm test -- --coverage --coverageThreshold="{\"global\":{\"lines\":${COV_THRESHOLD},\"statements\":${COV_THRESHOLD},\"functions\":${COV_THRESHOLD},\"branches\":${COV_THRESHOLD}}}"
+          else
+            npm test
+          fi
       - name: Skip tests
         if: ${{ !inputs.run-tests }}
         run: echo "run-tests=false — skipping npm test"
 
+  sast:
+    if: inputs.run-semgrep
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAST — Semgrep
+        run: |
+          pip install semgrep
+          semgrep scan --config=auto --severity=WARNING --error .
+
   build:
-    needs: [lint, typecheck, unit]
+    needs: [lint, typecheck, unit, sast]
     if: ${{ inputs.run-build != false }}
     runs-on: ubuntu-latest
     defaults:
