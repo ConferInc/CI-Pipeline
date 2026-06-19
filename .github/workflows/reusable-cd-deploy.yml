@@ -1,14 +1,21 @@
-# Reusable CD: build Docker image, push to GHCR, trigger Coolify deploy.
-# Only call this from a push-to-main context (gate with `if:` in the caller).
+# Reusable CD: build Docker image, deploy to Coolify (default) or Azure AKS.
+# Only call this from a push-to-main/staging context (gate with `if:` in the caller).
 #
-# Required secret (in caller or org): COOLIFY_DEPLOY_WEBHOOK_URL
-# Uses GITHUB_TOKEN (built-in) for GHCR push — no PAT needed.
+# deployment-target: coolify (default) — push to GHCR, trigger Coolify webhook
+# deployment-target: aks              — push to ACR, helm upgrade on AKS
+#
+# Coolify secrets: COOLIFY_DEPLOY_WEBHOOK_URL, COOLIFY_API_TOKEN
+# AKS secrets:     AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 
 on:
   workflow_call:
     inputs:
+      deployment-target:
+        description: "coolify or aks"
+        type: string
+        default: "coolify"
       image-name:
-        description: Image name on GHCR (e.g. nutrition-backend)
+        description: Image name (e.g. nutrition-backend)
         type: string
         required: true
       context:
@@ -29,21 +36,60 @@ on:
           (e.g. https://api.example.com/healthz). Leave empty to skip.
         type: string
         default: ""
+      # AKS-specific inputs
+      acr-name:
+        description: Azure Container Registry name (e.g. nutriqaacr)
+        type: string
+        default: "nutriqaacr"
+      aks-cluster:
+        description: AKS cluster name (e.g. nutri-qa-aks)
+        type: string
+        default: "nutri-qa-aks"
+      aks-resource-group:
+        description: Resource group containing the AKS cluster
+        type: string
+        default: "nutri-qa-rg"
+      helm-chart-path:
+        description: Path to the Helm chart directory (relative to repo root)
+        type: string
+        default: "helm"
+      helm-release-name:
+        description: Helm release name (defaults to image-name if not set)
+        type: string
+        default: ""
+      namespace:
+        description: Kubernetes namespace to deploy into
+        type: string
+        default: "default"
     secrets:
+      # Coolify
       COOLIFY_DEPLOY_WEBHOOK_URL:
-        description: Coolify deploy webhook URL for this application (e.g. https://coolify.confer.today/api/v1/deploy?uuid=...&force=false)
-        required: true
+        required: false
       COOLIFY_API_TOKEN:
-        description: Coolify API token (from Keys & Tokens in Coolify sidebar)
-        required: true
+        required: false
+      # AKS
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  publish:
-    name: Build & push image
+
+  # ─────────────────────────────────────────────
+  # COOLIFY PATH — push to GHCR + webhook trigger
+  # ─────────────────────────────────────────────
+
+  publish-ghcr:
+    name: Build & push to GHCR
+    if: inputs.deployment-target == 'coolify'
     runs-on: ubuntu-latest
     outputs:
       sha-tag: ${{ steps.meta.outputs.version }}
@@ -90,9 +136,10 @@ jobs:
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-  deploy:
+  deploy-coolify:
     name: Trigger Coolify deploy
-    needs: [publish]
+    if: inputs.deployment-target == 'coolify'
+    needs: [publish-ghcr]
     runs-on: ubuntu-latest
 
     steps:
@@ -130,7 +177,128 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "### Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "### Coolify Deploy" >> $GITHUB_STEP_SUMMARY
           echo "- Image: \`ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────
+  # AKS PATH — push to ACR + helm upgrade on AKS
+  # ─────────────────────────────────────────────
+
+  publish-acr:
+    name: Build & push to ACR
+    if: inputs.deployment-target == 'aks'
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.sha.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: sha
+        run: echo "tag=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: >-
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+
+      - name: Login to ACR
+        run: az acr login --name ${{ inputs.acr-name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push to ACR
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ steps.sha.outputs.tag }}
+            ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: ${{ inputs.build-args }}
+
+      - name: Summary
+        run: |
+          echo "### Image pushed to ACR" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ steps.sha.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+
+  deploy-aks:
+    name: Helm deploy to AKS
+    if: inputs.deployment-target == 'aks'
+    needs: [publish-acr]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: >-
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ inputs.aks-resource-group }} \
+            --name ${{ inputs.aks-cluster }} \
+            --overwrite-existing
+
+      - name: Helm upgrade / install
+        run: |
+          RELEASE="${{ inputs.helm-release-name }}"
+          if [ -z "$RELEASE" ]; then
+            RELEASE="${{ inputs.image-name }}"
+          fi
+          helm upgrade --install "$RELEASE" ${{ inputs.helm-chart-path }} \
+            --namespace ${{ inputs.namespace }} \
+            --create-namespace \
+            --set image.repository=${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }} \
+            --set image.tag=${{ needs.publish-acr.outputs.image-tag }} \
+            --wait \
+            --timeout 5m
+
+      - name: Health check
+        if: inputs.health-check-url != ''
+        run: |
+          URL="${{ inputs.health-check-url }}"
+          echo "Polling $URL for up to 5 minutes..."
+          for i in $(seq 1 20); do
+            CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 5 "$URL" 2>/dev/null || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "Health check passed (attempt $i, HTTP 200)"
+              exit 0
+            fi
+            echo "Attempt $i/20 — HTTP $CODE, retrying in 15s..."
+            sleep 15
+          done
+          echo "::error::Health check timed out after 5 minutes"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### AKS Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ needs.publish-acr.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Cluster: \`${{ inputs.aks-cluster }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Namespace: \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
