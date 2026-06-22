@@ -268,7 +268,11 @@ jobs:
           if [ -z "$RELEASE" ]; then
             RELEASE="${{ inputs.image-name }}"
           fi
-          helm upgrade --install "$RELEASE" ./${{ inputs.helm-chart-path }} \
+          ENV=$(echo "${{ inputs.namespace }}" | sed 's/nutri-//')
+          VALUES_FILE="./${{ inputs.helm-chart-path }}/values-${ENV}.yaml"
+          EXTRA_VALUES=""
+          if [ -f "$VALUES_FILE" ]; then EXTRA_VALUES="-f $VALUES_FILE"; fi
+          helm upgrade --install "$RELEASE" ./${{ inputs.helm-chart-path }} $EXTRA_VALUES \
             --namespace ${{ inputs.namespace }} \
             --create-namespace \
             --set image.repository=${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }} \
