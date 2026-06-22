@@ -268,7 +268,7 @@ jobs:
           if [ -z "$RELEASE" ]; then
             RELEASE="${{ inputs.image-name }}"
           fi
-          helm upgrade --install "$RELEASE" ${{ inputs.helm-chart-path }} \
+          helm upgrade --install "$RELEASE" ./${{ inputs.helm-chart-path }} \
             --namespace ${{ inputs.namespace }} \
             --create-namespace \
             --set image.repository=${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }} \
