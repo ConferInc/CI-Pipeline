@@ -276,9 +276,7 @@ jobs:
             --namespace ${{ inputs.namespace }} \
             --create-namespace \
             --set image.repository=${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }} \
-            --set image.tag=${{ needs.publish-acr.outputs.image-tag }} \
-            --wait \
-            --timeout 5m
+            --set image.tag=${{ needs.publish-acr.outputs.image-tag }}
 
       - name: Health check
         if: inputs.health-check-url != ''
